@@ -1,261 +1,322 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "./ReputationScore.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+import {ReputationScore} from "./ReputationScore.sol";
 
 /// @title LendingPool
-/// @notice Main lending contract that uses reputation scores to determine collateral requirements
-/// @dev Integrates with ReputationScore contract and Chainlink price feeds
-contract LendingPool is Ownable {
+/// @notice ETH-collateralized lending pool with reputation-based collateral tiers.
+/// @dev The lending token is assumed to be USD-pegged; ETH/USD comes from a Chainlink Data Feed.
+contract LendingPool is Ownable, ReentrancyGuard {
+    using SafeERC20 for IERC20;
 
     // ========== STATE VARIABLES ==========
 
-    /// @notice Reference to the reputation scoring contract
-    ReputationScore public reputationScore;
+    /// @notice Reference to the reputation scoring contract.
+    ReputationScore public immutable reputationScore;
 
-    /// @notice The ERC20 token users can borrow (e.g., DAI, USDC)
-    IERC20 public lendingToken;
+    /// @notice USD-pegged ERC20 token users can borrow.
+    IERC20 public immutable lendingToken;
 
-    /// @notice Fixed ETH price in USD (in production, use Chainlink oracle)
-    /// @dev For hackathon demo: 1 ETH = $2000. Format: price * 1e18
-    uint256 public ethPriceUSD = 2000 * 1e18;
+    /// @notice Chainlink ETH/USD price feed.
+    AggregatorV3Interface public immutable priceFeed;
 
-    // ========== COLLATERAL TIER CONSTANTS ==========
+    /// @notice Decimals used by the lending token.
+    uint8 public immutable lendingTokenDecimals;
 
-    /// @notice Collateral requirement for score 0 (new users)
-    uint256 public constant COLLATERAL_TIER_0 = 150; // 150%
+    /// @notice ETH currently backing active loans.
+    uint256 public totalActiveCollateral;
 
-    /// @notice Collateral requirement for score 25 (1 repayment)
-    uint256 public constant COLLATERAL_TIER_1 = 130; // 130%
+    // ========== CONSTANTS ==========
 
-    /// @notice Collateral requirement for score 50 (2 repayments)
-    uint256 public constant COLLATERAL_TIER_2 = 115; // 115%
+    /// @notice How long a borrower has to repay a loan.
+    uint256 public constant LOAN_DURATION = 7 days;
 
-    /// @notice Collateral requirement for score 75+ (3+ repayments)
-    uint256 public constant COLLATERAL_TIER_3 = 90;  // 90%
+    /// @notice Maximum age accepted for oracle data.
+    uint256 public constant MAX_PRICE_STALENESS = 1 days;
+
+    /// @notice Collateral requirement for score 0.
+    uint256 public constant COLLATERAL_TIER_0 = 150;
+
+    /// @notice Collateral requirement for score 25.
+    uint256 public constant COLLATERAL_TIER_1 = 130;
+
+    /// @notice Collateral requirement for score 50.
+    uint256 public constant COLLATERAL_TIER_2 = 115;
+
+    /// @notice Collateral requirement for score 75+.
+    uint256 public constant COLLATERAL_TIER_3 = 90;
 
     // ========== STRUCTS ==========
 
-    /// @notice Represents an active loan
+    /// @notice Represents an active loan.
     struct Loan {
-        uint256 collateralAmount; // ETH deposited as collateral
-        uint256 borrowedAmount;   // Tokens borrowed
-        uint256 timestamp;        // When the loan was taken
+        uint256 collateralAmount; // ETH deposited
+        uint256 borrowedAmount; // Lending token amount
+        uint256 timestamp; // Loan creation timestamp
     }
 
     // ========== MAPPINGS ==========
 
-    /// @notice Mapping of user addresses to their active loans
+    /// @notice User address => active loan.
     mapping(address => Loan) public loans;
 
     // ========== EVENTS ==========
 
-    /// @notice Emitted when a user takes a loan
     event LoanTaken(
         address indexed user,
         uint256 borrowedAmount,
         uint256 collateralAmount,
-        uint256 collateralRequirement
+        uint256 collateralRequirement,
+        uint256 repaymentDeadline
     );
 
-    /// @notice Emitted when a user repays their loan
-    event LoanRepaid(
-        address indexed user,
-        uint256 amount,
-        uint256 newScore
-    );
-
-    /// @notice Emitted when a loan is liquidated
-    event Liquidated(
-        address indexed user,
-        uint256 collateralSeized
-    );
-
-    /// @notice Emitted when ETH price is updated (admin function)
-    event EthPriceUpdated(uint256 newPrice);
+    event LoanRepaid(address indexed user, uint256 amount, uint256 newScore);
+    event Liquidated(address indexed user, uint256 collateralSeized);
+    event EthWithdrawn(address indexed recipient, uint256 amount);
 
     // ========== CONSTRUCTOR ==========
 
-    /// @notice Initialize the lending pool
-    /// @param _reputationScore Address of the ReputationScore contract
-    /// @param _lendingToken Address of the ERC20 token to lend (e.g., DAI)
-    constructor(
-        address _reputationScore,
-        address _lendingToken
-    ) Ownable(msg.sender) {
+    /// @notice Initialize the lending pool.
+    /// @param _reputationScore ReputationScore contract address.
+    /// @param _lendingToken USD-pegged ERC20 lending token address.
+    /// @param _priceFeed Chainlink ETH/USD feed address.
+    constructor(address _reputationScore, address _lendingToken, address _priceFeed) Ownable(msg.sender) {
         require(_reputationScore != address(0), "Invalid reputation address");
         require(_lendingToken != address(0), "Invalid token address");
+        require(_priceFeed != address(0), "Invalid price feed");
+
+        uint8 tokenDecimals = IERC20Metadata(_lendingToken).decimals();
+        require(tokenDecimals <= 18, "Token decimals too high");
+
+        uint8 feedDecimals = AggregatorV3Interface(_priceFeed).decimals();
+        require(feedDecimals <= 18, "Price decimals too high");
 
         reputationScore = ReputationScore(_reputationScore);
         lendingToken = IERC20(_lendingToken);
+        lendingTokenDecimals = tokenDecimals;
+        priceFeed = AggregatorV3Interface(_priceFeed);
     }
 
     // ========== ADMIN FUNCTIONS ==========
 
-    /// @notice Update ETH price manually (in production, use Chainlink oracle)
-    /// @param _priceUSD New ETH price in USD (with 18 decimals)
-    function setEthPrice(uint256 _priceUSD) external onlyOwner {
-        require(_priceUSD > 0, "Invalid price");
-        ethPriceUSD = _priceUSD;
-        emit EthPriceUpdated(_priceUSD);
+    /// @notice Deposit lending tokens into the pool.
+    /// @dev Owner must approve this contract before calling.
+    function depositLendingTokens(uint256 amount) external onlyOwner {
+        require(amount > 0, "Amount must be greater than zero");
+        lendingToken.safeTransferFrom(msg.sender, address(this), amount);
     }
 
-    /// @notice Owner can deposit lending tokens into the pool
-    /// @param amount Amount of tokens to deposit
-    function depositLendingTokens(uint256 amount) external onlyOwner {
-        require(
-            lendingToken.transferFrom(msg.sender, address(this), amount),
-            "Transfer failed"
-        );
+    /// @notice Withdraw ETH that is not reserved for active loans.
+    /// @dev This can withdraw seized collateral or ETH sent directly to the contract.
+    function withdrawAvailableEth(address payable recipient, uint256 amount) external onlyOwner nonReentrant {
+        require(recipient != address(0), "Invalid recipient");
+        require(amount > 0, "Amount must be greater than zero");
+        require(amount <= availableEth(), "Amount exceeds available ETH");
+
+        (bool success,) = recipient.call{value: amount}("");
+        require(success, "ETH transfer failed");
+
+        emit EthWithdrawn(recipient, amount);
+    }
+
+    // ========== PRICE FUNCTIONS ==========
+
+    /// @notice Get current ETH/USD price from Chainlink.
+    /// @return ETH price normalized to 18 decimals.
+    function getEthPrice() public view returns (uint256) {
+        (uint80 roundId, int256 answer,, uint256 updatedAt, uint80 answeredInRound) = priceFeed.latestRoundData();
+
+        require(answer > 0, "Invalid price");
+        require(updatedAt > 0, "Stale price");
+        require(updatedAt <= block.timestamp, "Invalid price timestamp");
+        require(answeredInRound >= roundId, "Stale price");
+        require(block.timestamp - updatedAt <= MAX_PRICE_STALENESS, "Stale price");
+
+        uint8 feedDecimals = priceFeed.decimals();
+        require(feedDecimals <= 18, "Price decimals too high");
+
+        return uint256(answer) * (10 ** (18 - feedDecimals));
+    }
+
+    // ========== COLLATERAL FUNCTIONS ==========
+
+    /// @notice Calculate required collateral percentage from reputation.
+    /// @param user Borrower address.
+    /// @return Collateral percentage (90-150).
+    function getCollateralRequirement(address user) public view returns (uint256) {
+        uint256 score = reputationScore.getScore(user);
+
+        if (score >= 75) {
+            return COLLATERAL_TIER_3;
+        }
+
+        if (score >= 50) {
+            return COLLATERAL_TIER_2;
+        }
+
+        if (score >= 25) {
+            return COLLATERAL_TIER_1;
+        }
+
+        return COLLATERAL_TIER_0;
+    }
+
+    /// @notice Calculate the USD value of ETH collateral using the latest oracle price.
+    /// @return USD value normalized to 18 decimals.
+    function getCollateralValueUSD(uint256 ethAmount) public view returns (uint256) {
+        return (ethAmount * getEthPrice()) / 1e18;
+    }
+
+    /// @notice Calculate the required USD collateral for a borrow amount.
+    /// @return Required collateral value normalized to 18 decimals.
+    function getRequiredCollateralValueUSD(address user, uint256 borrowAmount) public view returns (uint256) {
+        uint256 borrowValueUSD = _normalizeTokenAmount(borrowAmount);
+        return (borrowValueUSD * getCollateralRequirement(user)) / 100;
+    }
+
+    /// @notice ETH that can be withdrawn without touching active loan collateral.
+    function availableEth() public view returns (uint256) {
+        return address(this).balance - totalActiveCollateral;
+    }
+
+    /// @notice Get the deadline for a user's active loan.
+    function getRepaymentDeadline(address user) public view returns (uint256) {
+        Loan memory loan = loans[user];
+
+        if (loan.borrowedAmount == 0) {
+            return 0;
+        }
+
+        return loan.timestamp + LOAN_DURATION;
+    }
+
+    /// @notice Check whether a user's loan is overdue.
+    function isOverdue(address user) public view returns (bool) {
+        Loan memory loan = loans[user];
+
+        if (loan.borrowedAmount == 0) {
+            return false;
+        }
+
+        return block.timestamp > loan.timestamp + LOAN_DURATION;
     }
 
     // ========== CORE LENDING FUNCTIONS ==========
 
-    /// @notice Calculate required collateral percentage based on user's reputation score
-    /// @param user Address of the borrower
-    /// @return Collateral requirement as a percentage (90-150)
-    function getCollateralRequirement(address user) public view returns (uint256) {
-        uint256 score = reputationScore.getScore(user);
-
-        if (score >= 75) return COLLATERAL_TIER_3; // 90%
-        if (score >= 50) return COLLATERAL_TIER_2; // 115%
-        if (score >= 25) return COLLATERAL_TIER_1; // 130%
-        return COLLATERAL_TIER_0; // 150%
-    }
-
-    /// @notice Get current ETH price in USD
-    /// @return ETH price with 18 decimals
-    function getEthPrice() public view returns (uint256) {
-        return ethPriceUSD;
-    }
-
-    /// @notice Borrow tokens by depositing ETH collateral
-    /// @param borrowAmount Amount of tokens to borrow
-    function borrow(uint256 borrowAmount) external payable {
+    /// @notice Borrow lending tokens by depositing ETH collateral.
+    /// @param borrowAmount Amount of ERC20 tokens to borrow.
+    function borrow(uint256 borrowAmount) external payable nonReentrant {
         require(msg.value > 0, "Must deposit collateral");
         require(borrowAmount > 0, "Must borrow non-zero amount");
         require(loans[msg.sender].borrowedAmount == 0, "Already have active loan");
+        require(lendingToken.balanceOf(address(this)) >= borrowAmount, "Insufficient pool liquidity");
 
-        // Get user's collateral requirement based on their score
         uint256 collateralRequirement = getCollateralRequirement(msg.sender);
+        uint256 collateralValueUSD = getCollateralValueUSD(msg.value);
+        uint256 requiredCollateralUSD = getRequiredCollateralValueUSD(msg.sender, borrowAmount);
 
-        // Calculate collateral value in USD
-        // msg.value is in wei (18 decimals), ethPriceUSD has 18 decimals
-        // collateralValue = (ETH amount * ETH price) / 1e18
-        uint256 collateralValueUSD = (msg.value * ethPriceUSD) / 1e18;
+        require(collateralValueUSD >= requiredCollateralUSD, "Insufficient collateral");
 
-        // Calculate required collateral in USD
-        // If borrowing 100 tokens and requirement is 150%, need $150 worth of collateral
-        // Assuming lending token has 18 decimals (like DAI)
-        uint256 requiredCollateralUSD = (borrowAmount * collateralRequirement) / 100;
+        uint256 repaymentDeadline = block.timestamp + LOAN_DURATION;
 
-        require(
-            collateralValueUSD >= requiredCollateralUSD,
-            "Insufficient collateral"
-        );
+        loans[msg.sender] =
+            Loan({collateralAmount: msg.value, borrowedAmount: borrowAmount, timestamp: block.timestamp});
+        totalActiveCollateral += msg.value;
 
-        // Record the loan
-        loans[msg.sender] = Loan({
-            collateralAmount: msg.value,
-            borrowedAmount: borrowAmount,
-            timestamp: block.timestamp
-        });
+        lendingToken.safeTransfer(msg.sender, borrowAmount);
 
-        // Transfer tokens to borrower
-        require(
-            lendingToken.transfer(msg.sender, borrowAmount),
-            "Token transfer failed"
-        );
-
-        emit LoanTaken(msg.sender, borrowAmount, msg.value, collateralRequirement);
+        emit LoanTaken(msg.sender, borrowAmount, msg.value, collateralRequirement, repaymentDeadline);
     }
 
-    /// @notice Repay loan and get collateral back
-    function repay() external {
+    /// @notice Repay an active loan on time and receive collateral back.
+    function repay() external nonReentrant {
         Loan memory loan = loans[msg.sender];
+
         require(loan.borrowedAmount > 0, "No active loan");
+        require(block.timestamp <= loan.timestamp + LOAN_DURATION, "Loan overdue - liquidate");
 
         uint256 amountToRepay = loan.borrowedAmount;
         uint256 collateralToReturn = loan.collateralAmount;
 
-        // Transfer tokens back from borrower
-        require(
-            lendingToken.transferFrom(msg.sender, address(this), amountToRepay),
-            "Repayment failed"
-        );
-
-        // Clear loan data BEFORE external calls (reentrancy protection)
         delete loans[msg.sender];
+        totalActiveCollateral -= collateralToReturn;
 
-        // Increase reputation score
+        lendingToken.safeTransferFrom(msg.sender, address(this), amountToRepay);
         reputationScore.increaseScore(msg.sender);
+
         uint256 newScore = reputationScore.getScore(msg.sender);
 
-        // Return collateral to borrower
-        (bool success, ) = msg.sender.call{value: collateralToReturn}("");
+        (bool success,) = msg.sender.call{value: collateralToReturn}("");
         require(success, "ETH transfer failed");
 
         emit LoanRepaid(msg.sender, amountToRepay, newScore);
     }
 
-    /// @notice Liquidate an undercollateralized loan
-    /// @param user Address of the borrower to liquidate
-    function liquidate(address user) external {
+    /// @notice Liquidate an overdue or undercollateralized loan.
+    /// @param user Borrower to liquidate.
+    function liquidate(address user) external nonReentrant {
         Loan memory loan = loans[user];
+
         require(loan.borrowedAmount > 0, "No active loan");
+        require(_isLiquidatable(loan, user), "Loan not liquidatable");
 
-        // Check if loan is undercollateralized
-        uint256 collateralRequirement = getCollateralRequirement(user);
-        uint256 currentCollateralValue = (loan.collateralAmount * ethPriceUSD) / 1e18;
-        uint256 requiredCollateral = (loan.borrowedAmount * collateralRequirement) / 100;
-
-        require(
-            currentCollateralValue < requiredCollateral,
-            "Loan not liquidatable"
-        );
-
-        // Seize collateral
         uint256 collateralSeized = loan.collateralAmount;
 
-        // Clear loan data
         delete loans[user];
+        totalActiveCollateral -= collateralSeized;
 
-        // Reset reputation to 0
         reputationScore.resetScore(user);
-
-        // In production: transfer collateral to liquidator or protocol
-        // For demo: collateral stays in contract
 
         emit Liquidated(user, collateralSeized);
     }
 
     // ========== VIEW FUNCTIONS ==========
 
-    /// @notice Get loan details for a user
-    /// @param user Address of the borrower
-    /// @return Loan struct containing collateral, borrowed amount, and timestamp
+    /// @notice Get loan details.
     function getLoan(address user) external view returns (Loan memory) {
         return loans[user];
     }
 
-    /// @notice Check if a loan is eligible for liquidation
-    /// @param user Address of the borrower
-    /// @return True if the loan can be liquidated
+    /// @notice Check whether loan can currently be liquidated.
     function isLiquidatable(address user) external view returns (bool) {
         Loan memory loan = loans[user];
-        if (loan.borrowedAmount == 0) return false;
 
-        uint256 collateralRequirement = getCollateralRequirement(user);
-        uint256 currentCollateralValue = (loan.collateralAmount * ethPriceUSD) / 1e18;
-        uint256 requiredCollateral = (loan.borrowedAmount * collateralRequirement) / 100;
+        if (loan.borrowedAmount == 0) {
+            return false;
+        }
+
+        return _isLiquidatable(loan, user);
+    }
+
+    // ========== INTERNAL FUNCTIONS ==========
+
+    function _normalizeTokenAmount(uint256 amount) internal view returns (uint256) {
+        if (lendingTokenDecimals == 18) {
+            return amount;
+        }
+
+        return amount * (10 ** (18 - lendingTokenDecimals));
+    }
+
+    function _isLiquidatable(Loan memory loan, address user) internal view returns (bool) {
+        if (block.timestamp > loan.timestamp + LOAN_DURATION) {
+            return true;
+        }
+
+        uint256 currentCollateralValue = getCollateralValueUSD(loan.collateralAmount);
+        uint256 requiredCollateral = getRequiredCollateralValueUSD(user, loan.borrowedAmount);
 
         return currentCollateralValue < requiredCollateral;
     }
 
     // ========== FALLBACK ==========
 
-    /// @notice Allow contract to receive ETH
+    /// @notice Allow contract to receive ETH.
     receive() external payable {}
 }
