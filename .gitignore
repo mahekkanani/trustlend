@@ -1,0 +1,13 @@
+# Foundry build artifacts
+cache/
+out/
+broadcast/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
