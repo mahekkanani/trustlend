@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
 import { parseEther, formatEther } from 'viem'
-import { Minus, Plus, ArrowRight, Loader2, AlertCircle } from 'lucide-react'
+import { Minus, Plus, ArrowRight, Loader2, AlertCircle, Info } from 'lucide-react'
 import { LENDING_POOL_ABI } from '../contracts/abis'
 import { CONTRACT_ADDRESSES } from '../config/contracts'
 import { useEthPrice } from '../hooks/useEthPrice'
@@ -75,6 +75,7 @@ export default function BorrowConfigurator({ onSuccess, toast }) {
         functionName: 'borrow',
         args: [borrowAmountWei],
         value: requiredEthWei,
+        gas: 400000n,
       })
       setTxHash(hash)
       toast?.({ type: 'info', title: 'Transaction submitted', message: 'Waiting for confirmation...' })
@@ -95,25 +96,29 @@ export default function BorrowConfigurator({ onSuccess, toast }) {
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: 0.15 }}
-      className="rounded-2xl overflow-hidden"
+      className="rounded-3xl overflow-hidden"
       style={{
-        background: 'linear-gradient(135deg, #0c1018 0%, #0e1220 100%)',
+        background: 'linear-gradient(135deg, #0a0d14 0%, #0d1018 50%, #0e1220 100%)',
         border: '1px solid rgba(255,255,255,0.08)',
+        boxShadow: '0 0 60px rgba(0,0,0,0.4)',
       }}
     >
       <div className="p-6 sm:p-8">
         {/* Header */}
         <div className="mb-6">
-          <div className="text-xs uppercase tracking-[0.2em] text-text-muted mb-1">New Position</div>
-          <h3 className="text-lg font-semibold text-text-primary">Borrow Configurator</h3>
+          <div className="text-[10px] uppercase tracking-[0.25em] text-text-muted mb-1 font-medium">New Position</div>
+          <h3 className="text-xl font-bold tracking-tight text-text-primary">Borrow Configurator</h3>
         </div>
 
         {/* Borrow amount input */}
         <div className="mb-6">
-          <div className="text-xs uppercase tracking-[0.15em] text-text-muted mb-3">Borrow Amount</div>
+          <div className="text-xs uppercase tracking-[0.15em] text-text-muted mb-3 font-medium">Borrow Amount</div>
           <div
             className="flex items-center rounded-xl overflow-hidden"
-            style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}
+            style={{
+              background: 'rgba(255,255,255,0.03)',
+              border: '1px solid rgba(255,255,255,0.08)',
+            }}
           >
             <button
               onClick={() => adjustAmount(-100)}
@@ -122,7 +127,7 @@ export default function BorrowConfigurator({ onSuccess, toast }) {
               <Minus size={16} />
             </button>
             <div className="flex-1 relative">
-              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted text-lg font-light">$</span>
+              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted text-xl font-light">$</span>
               <input
                 type="number"
                 value={borrowInput}
@@ -130,7 +135,7 @@ export default function BorrowConfigurator({ onSuccess, toast }) {
                 placeholder="0.00"
                 min="0"
                 step="100"
-                className="w-full bg-transparent text-2xl font-bold text-text-primary text-center py-4 outline-none tabular-nums"
+                className="w-full bg-transparent text-3xl font-bold text-text-primary text-center py-4 outline-none tabular-nums"
                 style={{ paddingLeft: '2rem', paddingRight: '2rem' }}
               />
             </div>
@@ -141,7 +146,9 @@ export default function BorrowConfigurator({ onSuccess, toast }) {
               <Plus size={16} />
             </button>
           </div>
-          <div className="text-center text-xs text-text-muted mt-2 uppercase tracking-wider">DAI (USD-Pegged)</div>
+          <div className="text-center text-[10px] text-text-muted mt-2 uppercase tracking-[0.2em] font-medium">
+            DAI (USD-Pegged)
+          </div>
         </div>
 
         {/* Quick amounts */}
@@ -150,10 +157,10 @@ export default function BorrowConfigurator({ onSuccess, toast }) {
             <button
               key={amt}
               onClick={() => setBorrowInput(String(amt))}
-              className="flex-1 py-2 rounded-lg text-xs font-medium transition-all hover:bg-white/8"
+              className="flex-1 py-2.5 rounded-lg text-xs font-semibold transition-all hover:bg-white/8"
               style={{
-                background: borrowAmountNum === amt ? 'rgba(91,141,239,0.15)' : 'rgba(255,255,255,0.04)',
-                border: borrowAmountNum === amt ? '1px solid rgba(91,141,239,0.3)' : '1px solid rgba(255,255,255,0.06)',
+                background: borrowAmountNum === amt ? 'rgba(91,141,239,0.15)' : 'rgba(255,255,255,0.03)',
+                border: borrowAmountNum === amt ? '1px solid rgba(91,141,239,0.3)' : '1px solid rgba(255,255,255,0.05)',
                 color: borrowAmountNum === amt ? '#5B8DEF' : '#8C9BAB',
               }}
             >
@@ -165,7 +172,10 @@ export default function BorrowConfigurator({ onSuccess, toast }) {
         {/* Calculation summary */}
         <div
           className="rounded-xl overflow-hidden mb-6"
-          style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)' }}
+          style={{
+            background: 'rgba(255,255,255,0.02)',
+            border: '1px solid rgba(255,255,255,0.05)',
+          }}
         >
           <SummaryRow
             label="ETH Price"
@@ -202,18 +212,23 @@ export default function BorrowConfigurator({ onSuccess, toast }) {
 
         {/* Score improvement hint */}
         {scoreNumber < 75 && (
-          <div
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
             className="flex items-start gap-3 rounded-xl p-4 mb-6"
-            style={{ background: 'rgba(91,141,239,0.05)', border: '1px solid rgba(91,141,239,0.1)' }}
+            style={{
+              background: 'linear-gradient(135deg, rgba(91,141,239,0.06), rgba(139,92,246,0.03))',
+              border: '1px solid rgba(91,141,239,0.12)',
+            }}
           >
-            <AlertCircle size={16} color="#5B8DEF" style={{ flexShrink: 0, marginTop: 2 }} />
+            <Info size={16} color="#5B8DEF" style={{ flexShrink: 0, marginTop: 1 }} />
             <div className="text-xs text-text-secondary leading-relaxed">
-              Repay on time to earn +25 score. Higher score → lower collateral requirement.
+              <span className="font-semibold text-text-primary">Pro tip:</span> Repay on time to earn +25 score. Higher score → lower collateral requirement.
               {scoreNumber === 0 && ' Next repayment unlocks 130% collateral tier.'}
               {scoreNumber === 25 && ' Next repayment unlocks 115% collateral tier.'}
               {scoreNumber === 50 && ' Next repayment unlocks the 90% best tier.'}
             </div>
-          </div>
+          </motion.div>
         )}
 
         {/* Borrow button */}
@@ -222,14 +237,14 @@ export default function BorrowConfigurator({ onSuccess, toast }) {
           onClick={handleBorrow}
           whileHover={isValid && !isPending ? { scale: 1.01 } : {}}
           whileTap={isValid && !isPending ? { scale: 0.99 } : {}}
-          className="w-full py-4 rounded-xl font-semibold text-sm tracking-wider uppercase flex items-center justify-center gap-2 transition-all"
+          className="w-full py-4 rounded-xl font-bold text-sm tracking-[0.12em] uppercase flex items-center justify-center gap-2 transition-all"
           style={{
             background: isValid && !isPending
               ? 'linear-gradient(135deg, #5B8DEF, #8B5CF6)'
               : 'rgba(255,255,255,0.05)',
             color: isValid && !isPending ? '#fff' : '#4A5568',
             cursor: !isValid || isPending || !address ? 'not-allowed' : 'pointer',
-            boxShadow: isValid && !isPending ? '0 4px 20px rgba(91,141,239,0.3)' : 'none',
+            boxShadow: isValid && !isPending ? '0 8px 24px rgba(91,141,239,0.25)' : 'none',
           }}
         >
           {isPending ? (
@@ -263,8 +278,8 @@ function SummaryRow({ label, value, sub, highlight, noBorder }) {
       }}
     >
       <div>
-        <div className="text-xs uppercase tracking-wider text-text-muted">{label}</div>
-        {sub && <div className="text-xs text-text-muted/60 mt-0.5">{sub}</div>}
+        <div className="text-[10px] uppercase tracking-[0.2em] text-text-muted font-medium">{label}</div>
+        {sub && <div className="text-[10px] text-text-muted/60 mt-0.5">{sub}</div>}
       </div>
       <div
         className="text-sm font-semibold tabular-nums"

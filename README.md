@@ -1,45 +1,167 @@
 # TrustLend
 
-TrustLend is a Foundry smart contract prototype for ETH-collateralized borrowing with a simple on-chain reputation score. Borrowers repay on time to earn better collateral tiers, while overdue or undercollateralized loans can be liquidated.
+TrustLend is a reputation-based lending protocol where borrowers earn better collateral requirements by repaying loans on time.
 
-## Contracts
+## Demo
 
-- `LendingPool`: accepts ETH collateral, lends a USD-pegged ERC20, checks Chainlink ETH/USD pricing, and handles repayment/liquidation.
-- `ReputationScore`: tracks borrower scores from 0 to 100 and only allows the configured lending pool to update them.
-- `MockDAI`: test/demo ERC20 used for local development.
+- **Live deployment:** Sepolia
+- **Chain ID:** 11155111
+- **Frontend:** Local Vite app
+- **MetaMask Required:** Yes
+- **Anvil Required for Sepolia Demo:** NO. (Anvil is merely for local development)
 
-## Collateral Tiers
+## What is TrustLend?
 
-| Reputation score | Collateral required |
-| --- | --- |
-| 0-24 | 150% |
-| 25-49 | 130% |
-| 50-74 | 115% |
-| 75-100 | 90% |
+TrustLend provides ETH-collateralized borrowing against a USD-pegged asset (MockDAI). It uses an on-chain reputation score: building trust with the protocol gradually lowers the required collateral ratio from 150% down to undercollateralized (90%).
 
-The lending token is assumed to be USD-pegged. ETH collateral value is read from a Chainlink ETH/USD feed, normalized to 18 decimals, and rejected if the feed returns invalid or stale data.
+## Core Mechanism
 
-## Development
+Borrow
+ ↓
+Repay on time
+ ↓
++25 reputation
+ ↓
+lower collateral requirement
 
-```shell
-git submodule update --init --recursive
-forge build
-forge test
-forge fmt
-```
+**Collateral Tiers:**
+- **0 - 24 Score (NEW):** 150% Collateral
+- **25 - 49 Score (BASIC):** 130% Collateral
+- **50 - 74 Score (TRUSTED):** 115% Collateral
+- **75 - 100 Score (ESTABLISHED):** 90% Collateral
 
-## Deploy
+## Architecture
 
-Set the lending token and Chainlink ETH/USD feed addresses, then run the deployment script:
+1. **LendingPool:** Accepts ETH collateral, lends a USD-pegged ERC20, verifies pricing data, handles protocol liquidations and accepts repayments.
+2. **ReputationScore:** Dedicated score contract tracking users correctly. It can only be updated by the configured LendingPool.
+3. **Chainlink Data Feeds:** On-chain ETH/USD pricing oracle.
+4. **MockDAI:** Test ERC20 token used for lending flow verification.
 
-```shell
-$env:LENDING_TOKEN = "0x..."
-$env:ETH_USD_PRICE_FEED = "0x..."
-forge script script/DeployTrustLend.s.sol:DeployTrustLend --rpc-url <rpc_url> --private-key <private_key> --broadcast
-```
+## Tech Stack
 
-After deployment, the script connects `ReputationScore` to the deployed `LendingPool`. The pool owner can deposit lending liquidity with `depositLendingTokens` after approving the pool to spend the ERC20.
+**Frontend:**
+- React
+- Vite
+- Wagmi
+- Viem
+- TanStack Query
+- Framer Motion
+- Tailwind CSS
+- lucide-react
+- React Router
 
-## Notes
+**Blockchain:**
+- Solidity
+- Foundry
+- OpenZeppelin Contracts
+- Chainlink Data Feeds
 
-This is an MVP/hackathon-style lending prototype, not audited production code. Liquidated collateral remains in the protocol balance and can be withdrawn only when it is not reserved for active loans.
+**Wallet:**
+- MetaMask
+- Wagmi connectors
+
+## Prerequisites
+
+**Required:**
+- Git
+- Foundry
+- Node.js
+- npm
+- MetaMask
+
+**For Sepolia:**
+- Sepolia ETH for gas
+- Sepolia-compatible RPC endpoint (Alchemy, Infura, or another compatible provider)
+- *Note:* No external Chainlink server is required. The Solidity contract reads the configured Chainlink ETH/USD feed on-chain. OpenZeppelin is used by Solidity contracts through the existing Foundry dependency/remapping (see `foundry.toml`).
+
+## Frontend .env
+
+Copy the safe template provided in the repository:
+
+1. Copy `frontend/.env.example` to `frontend/.env`
+2. Replace `YOUR_API_KEY` locally for your RPC endpoint (e.g. Alchemy/Infura).
+3. **Never commit `frontend/.env`** to version control.
+
+*Security Warning:* Because Vite restricts environment variables directly to the browser prefixing `VITE_`, NEVER put private keys, seed phrases, or core secrets inside `VITE_*` variables.
+
+## Adding MockDAI to MetaMask
+
+MockDAI is used by this demo for testing. MetaMask may not automatically display custom MockDAI.
+
+**Current Sepolia MockDAI address:**
+`0x82EC91877980B8aAf62D3A6591d464DF6DC7b15e`
+
+**Steps to import:**
+1. Switch MetaMask to Sepolia.
+2. Open the Tokens/Assets section.
+3. Choose "Import token" or "Import tokens" depending on your MetaMask UI version.
+4. Paste: `0x82EC91877980B8aAf62D3A6591d464DF6DC7b15e`
+5. The token symbol and decimals should resolve from the contract where supported. Confirm and import.
+
+*Note:* If it does not appear automatically, manual import is completely intended. This is NOT Ethereum mainnet DAI. This is TrustLend's MockDAI test token. Do not use another random DAI address.
+
+## MockDAI / Token Balance Troubleshooting
+
+If MockDAI does not appear in MetaMask:
+- Verify your network is set to Sepolia.
+- Manually import the token using the current MockDAI address.
+- Refresh/reopen MetaMask.
+- Confirm your wallet address is correct.
+- Verify token balance through a Sepolia block explorer or `cast`.
+
+*Note:* Having Sepolia ETH does NOT automatically mean you have MockDAI. MockDAI is specific to this project test environment.
+
+## Sepolia Demo Instructions
+
+**How to verify the central showcase: REPAYMENT → REPUTATION → BETTER TERMS**
+
+1. Clone repo.
+2. Install frontend dependencies (`cd frontend && npm install`).
+3. Configure `frontend/.env`.
+4. Start frontend (`npm run dev`).
+5. Switch MetaMask to Sepolia.
+6. Connect wallet.
+7. Verify Chainlink oracle is LIVE on the dashboard.
+8. Verify Credit Score reads properly (starting at 0).
+9. **Borrow** MockDAI using ETH collateral (starts at 150%).
+10. **Repay** the loan.
+11. **Watch score increase** (+25 reputation).
+12. **Observe lower collateral tier** (next borrow becomes 130%, then 115%, etc.).
+
+## Local Anvil Development
+
+Anvil must be running for local `31337` development (Chain ID `31337`, RPC: `http://127.0.0.1:8545`).
+The local deployment script completely deploys MockDAI, MockV3Aggregator, ReputationScore, and LendingPool then connects them perfectly.
+
+*Note:* The Sepolia demo does NOT use the local MockV3Aggregator.
+
+**For local development:**
+- Run Anvil
+- Deploy local contracts
+- Configure frontend `.env` to `31337`
+- Use local accounts. (If Anvil outputs private keys, note that they are disposable local test keys generated by Anvil. Never put real wallet private keys in here.)
+
+## Sepolia Deployment Scripts
+
+The actual deployment scripts exist under `/script/` and do the following:
+
+- **DeployTrustLend.s.sol:** Reads `LENDING_TOKEN` and `ETH_USD_PRICE_FEED` variables, deploys `ReputationScore`, deploys `LendingPool`, and connects `ReputationScore` to `LendingPool`.
+- **DeployTrustLendLocal.s.sol:** Fully spins up a local instance by deploying `MockDAI`, `MockV3Aggregator`, `ReputationScore`, and `LendingPool`, connecting them entirely.
+- **FundPool.s.sol:** Reads `LENDING_POOL` and `MOCK_DAI` inputs, mints 100,000 MockDAI, approves the `LendingPool`, and deposits the 100,000 DAI liquidity instantly.
+
+## Current Sepolia Deployment
+
+**Network:** Ethereum Sepolia
+**Chain ID:** 11155111
+
+- **MockDAI:** `0x82EC91877980B8aAf62D3A6591d464DF6DC7b15e`
+- **ReputationScore:** `0x15325a97bEF3215EbA08E39Fe3772EDd6e0E9c34`
+- **LendingPool:** `0x7E3c1B0bd05200d6aEe75441DEd89572dAA425ad`
+- **Chainlink ETH/USD:** `0x694AA1769357215DE4FAC081bf1f309aDC325306`
+
+*(The current LendingPool has been funded with: 100,000 MockDAI)*
+
+## Evaluator / Demo Wallet
+
+An optional disposable Sepolia-only evaluator wallet may be provided directly to the hackathon organizers/checker. The private key should be shared separately and privately, never through the public repository.
+*(Any provided wallet contains only testnet assets for gas, testing, and evaluator transactions. It should never be reused for Ethereum Mainnet or hold real funds!)*

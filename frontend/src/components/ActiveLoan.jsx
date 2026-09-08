@@ -1,13 +1,14 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
 import { formatUnits, maxUint256 } from 'viem'
 import { Clock, AlertTriangle, CheckCircle, Loader2, ArrowRight, Zap } from 'lucide-react'
-import { LENDING_POOL_ABI, MOCK_DAI_ABI } from '../contracts/abis'
+import { LENDING_POOL_ABI, MOCK_DAI_ABI, REPUTATION_SCORE_ABI } from '../contracts/abis'
 import { CONTRACT_ADDRESSES } from '../config/contracts'
 import { useEthPrice } from '../hooks/useEthPrice'
 import { fmtEth, fmtCountdown, fmtTimestamp, fmtEthPrice } from '../utils/format'
 import { calcHealthRatio, getLoanStatus } from '../utils/calculations'
+import RepaymentSuccessModal from './RepaymentSuccessModal'
 
 export default function ActiveLoan({ loan, deadline, isOverdue, isLiquidatable, onRepaid, toast }) {
   const { address } = useAccount()
@@ -16,6 +17,28 @@ export default function ActiveLoan({ loan, deadline, isOverdue, isLiquidatable, 
   const [approveTxHash, setApproveTxHash] = useState(null)
   const [repayTxHash, setRepayTxHash] = useState(null)
   const [step, setStep] = useState('idle') // idle | checking | approving | repaying | done
+  const [showSuccessModal, setShowSuccessModal] = useState(false)
+  const [successData, setSuccessData] = useState(null)
+  const scoreRef = useRef(null)
+  const collateralRef = useRef(null)
+
+  // Read user's actual collateral requirement (depends on reputation)
+  const { data: collateralReq, refetch: refetchCollateral } = useReadContract({
+    address: CONTRACT_ADDRESSES.lendingPool,
+    abi: LENDING_POOL_ABI,
+    functionName: 'getCollateralRequirement',
+    args: [address],
+    query: { enabled: !!address },
+  })
+
+  // Read user's credit score to capture before repayment
+  const { data: creditScore, refetch: refetchScore } = useReadContract({
+    address: CONTRACT_ADDRESSES.reputationScore,
+    abi: REPUTATION_SCORE_ABI,
+    functionName: 'getScore',
+    args: [address],
+    query: { enabled: !!address },
+  })
 
   // Read current DAI allowance
   const { data: allowance, refetch: refetchAllowance } = useReadContract({
@@ -40,7 +63,15 @@ export default function ActiveLoan({ loan, deadline, isOverdue, isLiquidatable, 
   // Track approve tx
   const { isSuccess: approveConfirmed } = useWaitForTransactionReceipt({ hash: approveTxHash })
   // Track repay tx
-  const { isSuccess: repayConfirmed } = useWaitForTransactionReceipt({ hash: repayTxHash })
+  const { isSuccess: repayConfirmed, data: repayReceipt } = useWaitForTransactionReceipt({ hash: repayTxHash })
+
+  // Capture score and collateral before repayment starts
+  useEffect(() => {
+    if (step === 'repaying' && creditScore != null && collateralReq != null) {
+      scoreRef.current = Number(creditScore)
+      collateralRef.current = Number(collateralReq)
+    }
+  }, [step, creditScore, collateralReq])
 
   // After approve confirmed, trigger repay
   useEffect(() => {
@@ -54,25 +85,38 @@ export default function ActiveLoan({ loan, deadline, isOverdue, isLiquidatable, 
   useEffect(() => {
     if (repayConfirmed) {
       setStep('done')
-      toast?.({
-        type: 'success',
-        title: 'Repayment confirmed',
-        message: 'Credit score increased by 25. Collateral returned.',
-        duration: 8000,
-      })
-      setTimeout(() => {
+
+      // Wait briefly for blockchain state to update, then show modal
+      setTimeout(async () => {
+        // Refetch to get new score and collateral
+        const newScoreResult = await refetchScore()
+        const newCollateralResult = await refetchCollateral()
+
+        const oldScore = scoreRef.current ?? 0
+        const oldCollateral = collateralRef.current ?? 150
+        const finalNewScore = newScoreResult.data != null ? Number(newScoreResult.data) : oldScore + 25
+        const finalNewCollateral = newCollateralResult.data != null ? Number(newCollateralResult.data) : oldCollateral
+
+        setSuccessData({
+          oldScore,
+          newScore: finalNewScore,
+          oldCollateral,
+          newCollateral: finalNewCollateral,
+          borrowAmount: loan?.borrowedAmount,
+        })
+        setShowSuccessModal(true)
+
         onRepaid?.()
-        setStep('idle')
-      }, 2000)
+      }, 1500)
     }
   }, [repayConfirmed])
 
-  // Countdown timer
+  // Countdown timer - updates every second for premium feel
   useEffect(() => {
     if (!deadline) return
     const update = () => setCountdown(fmtCountdown(deadline))
     update()
-    const interval = setInterval(update, 30_000)
+    const interval = setInterval(update, 1000) // Update every second
     return () => clearInterval(interval)
   }, [deadline])
 
@@ -82,8 +126,11 @@ export default function ActiveLoan({ loan, deadline, isOverdue, isLiquidatable, 
   const collateralAmount = loan.collateralAmount
   const loanTimestamp = loan.timestamp
 
+  // Use actual collateral requirement (depends on user's reputation score)
+  const collateralPct = collateralReq != null ? Number(collateralReq) : 150
+
   const healthRatio = ethPrice
-    ? calcHealthRatio(collateralAmount, borrowedAmount, 150, ethPrice)
+    ? calcHealthRatio(collateralAmount, borrowedAmount, collateralPct, ethPrice)
     : null
   const status = getLoanStatus(healthRatio, isOverdue)
 
@@ -141,21 +188,37 @@ export default function ActiveLoan({ loan, deadline, isOverdue, isLiquidatable, 
 
   const isPending = step === 'approving' || step === 'repaying' || step === 'checking'
 
+  function handleModalClose() {
+    setShowSuccessModal(false)
+    setStep('idle')
+  }
+
   return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.98 }}
-      animate={{ opacity: 1, scale: 1 }}
-      className="rounded-2xl overflow-hidden"
-      style={{
-        background: 'linear-gradient(135deg, #0c1018 0%, #0e1220 100%)',
-        border: isOverdue
-          ? '1px solid rgba(248,113,113,0.25)'
-          : '1px solid rgba(251,191,36,0.15)',
-        boxShadow: isOverdue
-          ? '0 0 30px rgba(248,113,113,0.05)'
-          : '0 0 30px rgba(251,191,36,0.03)',
-      }}
-    >
+    <>
+      <RepaymentSuccessModal
+        isOpen={showSuccessModal}
+        onClose={handleModalClose}
+        oldScore={successData?.oldScore}
+        newScore={successData?.newScore}
+        oldCollateral={successData?.oldCollateral}
+        newCollateral={successData?.newCollateral}
+        borrowAmount={successData?.borrowAmount}
+      />
+
+      <motion.div
+        initial={{ opacity: 0, scale: 0.98 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="rounded-2xl overflow-hidden"
+        style={{
+          background: 'linear-gradient(135deg, #0c1018 0%, #0e1220 100%)',
+          border: isOverdue
+            ? '1px solid rgba(248,113,113,0.25)'
+            : '1px solid rgba(251,191,36,0.15)',
+          boxShadow: isOverdue
+            ? '0 0 30px rgba(248,113,113,0.05)'
+            : '0 0 30px rgba(251,191,36,0.03)',
+        }}
+      >
       {/* Status header strip */}
       <div
         className="px-6 py-3 flex items-center justify-between"
@@ -305,6 +368,7 @@ export default function ActiveLoan({ loan, deadline, isOverdue, isLiquidatable, 
         </motion.button>
       </div>
     </motion.div>
+    </>
   )
 }
 

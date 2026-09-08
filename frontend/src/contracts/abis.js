@@ -124,6 +124,11 @@ export const LENDING_POOL_ABI = [
     "stateMutability": "view"
   },
   {
+    "type": "function", "name": "priceFeed",
+    "inputs": [], "outputs": [{ "name": "", "type": "address" }],
+    "stateMutability": "view"
+  },
+  {
     "type": "function", "name": "lendingTokenDecimals",
     "inputs": [], "outputs": [{ "name": "", "type": "uint8" }],
     "stateMutability": "view"
@@ -297,5 +302,24 @@ export const MOCK_DAI_ABI = [
       { "name": "value", "type": "uint256", "indexed": false }
     ],
     "anonymous": false
+  }
+]
+
+
+// Minimal Chainlink AggregatorV3Interface ABI — only latestRoundData is needed.
+// This is the standard Chainlink interface, not a generated artifact.
+export const CHAINLINK_FEED_ABI = [
+  {
+    "type": "function",
+    "name": "latestRoundData",
+    "inputs": [],
+    "outputs": [
+      { "name": "roundId",         "type": "uint80"  },
+      { "name": "answer",          "type": "int256"  },
+      { "name": "startedAt",       "type": "uint256" },
+      { "name": "updatedAt",       "type": "uint256" },
+      { "name": "answeredInRound", "type": "uint80"  }
+    ],
+    "stateMutability": "view"
   }
 ]

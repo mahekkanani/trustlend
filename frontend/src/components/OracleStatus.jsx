@@ -4,10 +4,12 @@ import { fmtEthPrice } from '../utils/format'
 import { Database, RefreshCw } from 'lucide-react'
 
 export default function OracleStatus() {
-  const { price, isLoading, isError, refetch, updatedAt } = useEthPrice()
+  const { price, isLoading, isError, isStale, onChainUpdatedAtSecs, isRefetching, refetch } = useEthPrice()
 
-  const secsAgo = updatedAt
-    ? Math.floor((Date.now() - updatedAt) / 1000)
+  // secsAgo is derived from the on-chain Chainlink updatedAt (seconds), not
+  // from wagmi's JS cache timestamp (milliseconds), so the unit is correct.
+  const secsAgo = onChainUpdatedAtSecs
+    ? Math.floor(Date.now() / 1000) - onChainUpdatedAtSecs
     : null
 
   return (
@@ -44,10 +46,11 @@ export default function OracleStatus() {
 
         <button
           onClick={() => refetch()}
-          className="p-1.5 rounded-lg transition-colors hover:bg-white/5 text-text-muted hover:text-text-secondary"
+          disabled={isRefetching}
+          className="p-1.5 rounded-lg transition-colors hover:bg-white/5 text-text-muted hover:text-text-secondary disabled:opacity-50 disabled:cursor-not-allowed"
           title="Refresh price"
         >
-          <RefreshCw size={14} />
+          <RefreshCw size={14} className={isRefetching ? 'animate-spin' : ''} />
         </button>
       </div>
 
@@ -60,16 +63,16 @@ export default function OracleStatus() {
 
         <div className="flex items-center gap-1.5">
           <span className="relative flex h-1.5 w-1.5">
-            {!isError && (
+            {!isError && !isStale && (
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-60" />
             )}
             <span
               className="relative inline-flex rounded-full h-1.5 w-1.5"
-              style={{ background: isError ? '#F87171' : '#34D399' }}
+              style={{ background: isError || isStale ? '#F87171' : '#34D399' }}
             />
           </span>
           <span className="text-xs text-text-muted uppercase tracking-wider">
-            {isError ? 'STALE' : 'LIVE'}
+            {isError ? 'ERROR' : isStale ? 'STALE' : 'LIVE'}
           </span>
         </div>
 
