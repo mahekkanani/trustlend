@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
+import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt, useConnections } from 'wagmi'
 import { parseEther, formatEther } from 'viem'
 import { Minus, Plus, ArrowRight, Loader2, AlertCircle, Info } from 'lucide-react'
 import { LENDING_POOL_ABI } from '../contracts/abis'
@@ -12,6 +12,7 @@ import { calcRequiredEth } from '../utils/calculations'
 
 export default function BorrowConfigurator({ onSuccess, toast }) {
   const { address } = useAccount()
+  const connections = useConnections()
   const { price: ethPrice, isLoading: priceLoading } = useEthPrice()
   const { scoreNumber, refetch: refetchScore } = useCreditScore()
   const [borrowInput, setBorrowInput] = useState('')
@@ -76,6 +77,7 @@ export default function BorrowConfigurator({ onSuccess, toast }) {
         args: [borrowAmountWei],
         value: requiredEthWei,
         gas: 400000n,
+        connector: connections[0]?.connector,
       })
       setTxHash(hash)
       toast?.({ type: 'info', title: 'Transaction submitted', message: 'Waiting for confirmation...' })

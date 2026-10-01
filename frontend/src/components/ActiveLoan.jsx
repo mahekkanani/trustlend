@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
+import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt, useConnections } from 'wagmi'
 import { formatUnits, maxUint256 } from 'viem'
 import { Clock, AlertTriangle, CheckCircle, Loader2, ArrowRight, Zap } from 'lucide-react'
 import { LENDING_POOL_ABI, MOCK_DAI_ABI, REPUTATION_SCORE_ABI } from '../contracts/abis'
@@ -12,6 +12,7 @@ import RepaymentSuccessModal from './RepaymentSuccessModal'
 
 export default function ActiveLoan({ loan, deadline, isOverdue, isLiquidatable, onRepaid, toast }) {
   const { address } = useAccount()
+  const connections = useConnections()
   const { price: ethPrice } = useEthPrice()
   const [countdown, setCountdown] = useState(null)
   const [approveTxHash, setApproveTxHash] = useState(null)
@@ -155,6 +156,7 @@ export default function ActiveLoan({ loan, deadline, isOverdue, isLiquidatable, 
           abi: MOCK_DAI_ABI,
           functionName: 'approve',
           args: [CONTRACT_ADDRESSES.lendingPool, maxUint256],
+          connector: connections[0]?.connector,
         })
         setApproveTxHash(hash)
         toast?.({ type: 'info', title: 'Approval needed', message: 'Approving DAI spend...' })
@@ -176,6 +178,7 @@ export default function ActiveLoan({ loan, deadline, isOverdue, isLiquidatable, 
         abi: LENDING_POOL_ABI,
         functionName: 'repay',
         args: [],
+        connector: connections[0]?.connector,
       })
       setRepayTxHash(hash)
       toast?.({ type: 'info', title: 'Repayment submitted', message: 'Waiting for confirmation...' })
